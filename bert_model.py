@@ -160,6 +160,8 @@ def main():
     predictions, true_labels, acc, f1 = model.evaluate_model(test_loader, device)
     print(classification_report(true_labels, predictions, target_names=label_encoder.classes_))
 
+    torch.save(model.state_dict(), "bert_model.pth")
+    print("Model saved to bert_model.pth")
 
 if __name__ == "__main__":
     main()
