@@ -40,8 +40,7 @@ set -x
 
 cd $HOME/RUControversial
 
-conda init bash
-eval "$(conda shell.bash hook)"
+source ~/miniconda3/etc/profile.d/conda.sh
 conda activate cs439
 
 python bert_model.py
