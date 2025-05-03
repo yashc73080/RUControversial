@@ -7,3 +7,4 @@ psycopg2==2.9.10
 dotenv==0.9.9
 scikit-learn==1.6.1
 matplotlib==3.10.1
+sqlalchemy==2.0.40
