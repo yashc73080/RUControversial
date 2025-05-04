@@ -50,4 +50,7 @@ EOT
 # sbatch jobscript.sh
 
 # See logs:
-cd /scratch/$USER/logs/RUControversial
+# cd /scratch/$USER/logs/RUControversial
+
+# View progress:
+# watch -n 1 squeue -u yc1376

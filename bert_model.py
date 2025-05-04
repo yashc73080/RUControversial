@@ -1,22 +1,22 @@
-from dotenv import load_dotenv
-from sqlalchemy import create_engine
-import os
-
-from transformers import BertModel, BertTokenizer
+import numpy as np
+import pandas as pd
 
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 
-import pandas as pd
-import numpy as np
+from transformers import BertModel, BertTokenizer
 
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, f1_score, classification_report
 from sklearn.utils.class_weight import compute_class_weight
 
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+
 from tqdm import tqdm
+import os
 
 
 class BERTClassifier(nn.Module):
@@ -90,9 +90,8 @@ class RedditDataset(Dataset):
         item = {key: val[idx] for key, val in self.encodings.items()}
         item['labels'] = self.labels[idx]
         return item
-
-
-def main():
+    
+def get_df():
     load_dotenv()
 
     # Fetch variables
@@ -110,9 +109,13 @@ def main():
     except Exception as e:
         print(f"Failed to connect: {e}")
 
+    # Get pandas df
     query = "SELECT id, combined_text, verdict FROM aita_posts;"
     df = pd.read_sql_query(query, engine)
-    
+
+    return df
+
+def prepare_dataloaders(df):
     label_encoder = LabelEncoder()
     df['verdict_encoded'] = label_encoder.fit_transform(df['verdict'])
 
@@ -132,15 +135,27 @@ def main():
     train_labels = torch.tensor(train_labels)
     test_labels = torch.tensor(test_labels)
 
-
     train_dataset = RedditDataset(train_encodings, train_labels)
     test_dataset = RedditDataset(test_encodings, test_labels)
 
+    # Create DataLoaders
     train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4)
     test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False, num_workers=4)
 
+    return train_loader, test_loader, label_encoder, train_labels, test_labels
+
+
+def main():
+    
+    # Load the DataFrame
+    df = get_df()
+
+    # Get the dataloaders
+    train_loader, test_loader, label_encoder, train_labels, test_labels = prepare_dataloaders(df)
+
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
+    # Initialize the model
     model = BERTClassifier()
     model.to(device)
 
@@ -152,14 +167,19 @@ def main():
     )
     class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
 
+    # Initialize optimizer and loss function
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
     loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
+    # Train the model
     model.train_model(train_loader, optimizer, loss_fn, device, epochs=8)
 
+    # Evaluate the model
     predictions, true_labels, acc, f1 = model.evaluate_model(test_loader, device)
     print(classification_report(true_labels, predictions, target_names=label_encoder.classes_))
 
+    # Save the model
+    model.cpu()
     torch.save(model.state_dict(), "bert_model.pth")
     print("Model saved to bert_model.pth")
 
