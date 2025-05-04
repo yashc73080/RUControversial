@@ -1,2 +1,4 @@
 .env
-Data/aita_clean.csv
+Data/*
+*.csv
+*.pth
