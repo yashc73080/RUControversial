@@ -158,6 +158,8 @@ def prepare_dataloaders(df):
 
     test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False, num_workers=4)
 
+    print('Data preparation complete.')
+
     return train_loader, test_loader, label_encoder, train_labels, test_labels
 
 
@@ -196,11 +198,15 @@ def main():
     )
     loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
+    print("Model and optimizer initialized.")
+
     # Train the model
     for param in model.bert.parameters(): # Freeze BERT parameters initially
         param.requires_grad = False
 
     model.train_model(train_loader, optimizer, scheduler, loss_fn, device, epochs=8)
+    
+    print("Training complete.")
 
     # Evaluate the model
     predictions, true_labels, acc, f1 = model.evaluate_model(test_loader, device)
