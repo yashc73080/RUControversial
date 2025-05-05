@@ -3,12 +3,13 @@ import pandas as pd
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 
-from transformers import BertModel, BertTokenizer, get_linear_schedule_with_warmup
+from transformers import BertModel, BertTokenizer, get_linear_schedule_with_warmup, AutoModel, AutoTokenizer
 
 from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import accuracy_score, f1_score, classification_report
 from sklearn.utils.class_weight import compute_class_weight
 
@@ -17,31 +18,72 @@ from sqlalchemy import create_engine
 
 from tqdm import tqdm
 import os
+import re
+import numpy as np
+import random
+
+
+def set_seed(seed_value=42):
+    """Set seed for reproducibility."""
+    random.seed(seed_value)
+    np.random.seed(seed_value)
+    torch.manual_seed(seed_value)
+    torch.cuda.manual_seed_all(seed_value)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 class BERTClassifier(nn.Module):
-    def __init__(self, dropout=0.3):
+    def __init__(self, model_name='roberta-base', num_classes=4, dropout=0.3):
         super(BERTClassifier, self).__init__()
-        self.bert = BertModel.from_pretrained('bert-base-uncased')
+        self.bert = AutoModel.from_pretrained(model_name)
         self.dropout = nn.Dropout(dropout)
-        self.classifier = nn.Linear(self.bert.config.hidden_size, 4)
+        hidden_size = self.bert.config.hidden_size
+        
+        # Add intermediate layer
+        self.intermediate = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        
+        self.classifier = nn.Linear(hidden_size, num_classes)
 
-    def forward(self, input_ids, attention_mask):
-        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        last_hidden_state = outputs.last_hidden_state
-        pooled_output = last_hidden_state.mean(dim=1)
-        x = self.dropout(pooled_output)
-
-        return self.classifier(x)
+    def forward(self, input_ids, attention_mask, token_type_ids=None):
+        # Pass token_type_ids if model supports it
+        if token_type_ids is not None and 'bert-' in self.bert.config._name_or_path:
+            outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
+        else:
+            outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        
+        # Get the [CLS] token representation instead of mean pooling
+        pooled_output = outputs.last_hidden_state[:, 0, :]
+        
+        # Apply intermediate layer
+        x = self.intermediate(pooled_output)
+        
+        # Apply classifier
+        logits = self.classifier(x)
+        
+        return logits
     
-    def train_model(self, train_loader, optimizer, scheduler, loss_fn, device, epochs=3):
-        self.train()
-        for epoch in range(epochs): 
-            # Unfreeze BERT parameters after the first epoch
+    def train_model(self, train_loader, optimizer, scheduler, loss_fn, device, epochs=3, eval_loader=None, patience=3):
+        best_f1 = 0
+        patience_counter = 0
+        
+        for epoch in range(epochs):
+            # Training phase
+            self.train()
+            total_loss = 0
+            total_steps = 0
+            
+            # Only unfreeze BERT parameters after first epoch
             if epoch == 1:
+                print("Unfreezing encoder parameters...")
                 for param in self.bert.parameters():
                     param.requires_grad = True
-
+            
             loop = tqdm(train_loader, leave=True)
             for batch in loop:
                 optimizer.zero_grad()
@@ -49,29 +91,73 @@ class BERTClassifier(nn.Module):
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
                 labels = batch['labels'].to(device)
-
-                outputs = self(input_ids, attention_mask)
+                
+                # Handle token_type_ids if present
+                token_type_ids = batch.get('token_type_ids')
+                if token_type_ids is not None:
+                    token_type_ids = token_type_ids.to(device)
+                    outputs = self(input_ids, attention_mask, token_type_ids)
+                else:
+                    outputs = self(input_ids, attention_mask)
+                
                 loss = loss_fn(outputs, labels)
                 loss.backward()
+                
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+                
                 optimizer.step()
                 scheduler.step()
+                
+                total_loss += loss.item()
+                total_steps += 1
 
-                loop.set_description(f'Epoch {epoch}')
+                loop.set_description(f'Epoch {epoch+1}/{epochs}')
                 loop.set_postfix(loss=loss.item())
+            
+            avg_train_loss = total_loss / total_steps
+            print(f"Epoch {epoch+1}/{epochs} - Avg training loss: {avg_train_loss:.4f}")
+            
+            # Evaluation phase
+            if eval_loader:
+                _, _, eval_acc, eval_f1 = self.evaluate_model(eval_loader, device)
+                print(f"Validation - Accuracy: {eval_acc:.4f}, F1: {eval_f1:.4f}")
+                
+                # Early stopping logic
+                if eval_f1 > best_f1:
+                    best_f1 = eval_f1
+                    patience_counter = 0
+                    # Save the best model
+                    torch.save(self.state_dict(), "best_bert_model.pth")
+                    print(f"New best model saved with F1: {best_f1:.4f}")
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print(f"Early stopping triggered after {epoch+1} epochs")
+                        # Load the best model
+                        self.load_state_dict(torch.load("best_bert_model.pth"))
+                        return
 
     def evaluate_model(self, test_loader, device):
         self.eval()
         predictions, true_labels = [], []
-
+        
         with torch.no_grad():
             for batch in test_loader:
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
                 labels = batch['labels'].to(device)
-
-                outputs = self(input_ids, attention_mask)
-                preds = torch.argmax(outputs, axis=1)
-
+                
+                # Handle token_type_ids if present
+                token_type_ids = batch.get('token_type_ids')
+                if token_type_ids is not None:
+                    token_type_ids = token_type_ids.to(device)
+                    outputs = self(input_ids, attention_mask, token_type_ids)
+                else:
+                    outputs = self(input_ids, attention_mask)
+                
+                _, preds = torch.max(outputs, dim=1)
+                
                 predictions.extend(preds.cpu().numpy())
                 true_labels.extend(labels.cpu().numpy())
 
@@ -79,10 +165,8 @@ class BERTClassifier(nn.Module):
         acc = accuracy_score(true_labels, predictions)
         f1 = f1_score(true_labels, predictions, average='weighted')
 
-        print(f'Accuracy: {acc:.4f}')
-        print(f'F1-Score: {f1:.4f}')
-
         return predictions, true_labels, acc, f1
+    
     
 class RedditDataset(Dataset):
     def __init__(self, encodings, labels):
@@ -96,7 +180,27 @@ class RedditDataset(Dataset):
         item = {key: val[idx] for key, val in self.encodings.items()}
         item['labels'] = self.labels[idx]
         return item
-    
+
+
+def preprocess_text(text):
+    """Clean and preprocess text data."""
+    if isinstance(text, str):
+        # Convert to lowercase
+        text = text.lower()
+        
+        # Remove URLs
+        text = re.sub(r'http\S+|www\S+|https\S+', '', text)
+        
+        # Remove Reddit formatting
+        text = re.sub(r'\[.*?\]', '', text)  # Remove [AITA] tags
+        
+        # Remove extra whitespaces
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        return text
+    return ""
+
+
 def get_df():
     load_dotenv()
 
@@ -118,104 +222,255 @@ def get_df():
     # Get pandas df
     query = "SELECT id, combined_text, verdict FROM aita_posts;"
     df = pd.read_sql_query(query, engine)
-
+    
+    # Clean the data
+    df['combined_text'] = df['combined_text'].apply(preprocess_text)
+    
+    # Remove rows with empty text or missing values
+    df = df.dropna(subset=['combined_text', 'verdict'])
+    df = df[df['combined_text'].str.len() > 10]  # Remove very short posts
+    
     return df
 
-def prepare_dataloaders(df):
+
+def prepare_dataloaders(df, model_name='roberta-base', max_length=256, val_size=0.1):
     label_encoder = LabelEncoder()
     df['verdict_encoded'] = label_encoder.fit_transform(df['verdict'])
-
-    train_texts, test_texts, train_labels, test_labels = train_test_split(
+    
+    # Split into train, validation, and test sets
+    train_val_texts, test_texts, train_val_labels, test_labels = train_test_split(
         df['combined_text'].values, 
         df['verdict_encoded'].values, 
         test_size=0.2, 
-        random_state=42
+        random_state=42,
+        stratify=df['verdict_encoded'].values  # Stratified split to maintain class distribution
+    )
+    
+    train_texts, val_texts, train_labels, val_labels = train_test_split(
+        train_val_texts,
+        train_val_labels,
+        test_size=val_size/(1-0.2),  # Adjust validation size 
+        random_state=42,
+        stratify=train_val_labels  # Stratified split
     )
 
     # Tokenize
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    train_encodings = tokenizer(list(train_texts), truncation=True, padding=True, max_length=128, return_tensors='pt')
-    test_encodings = tokenizer(list(test_texts), truncation=True, padding=True, max_length=128, return_tensors='pt')
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    
+    train_encodings = tokenizer(
+        list(train_texts), 
+        truncation=True, 
+        padding='max_length', 
+        max_length=max_length, 
+        return_tensors='pt'
+    )
+    
+    val_encodings = tokenizer(
+        list(val_texts), 
+        truncation=True, 
+        padding='max_length', 
+        max_length=max_length, 
+        return_tensors='pt'
+    )
+    
+    test_encodings = tokenizer(
+        list(test_texts), 
+        truncation=True, 
+        padding='max_length', 
+        max_length=max_length, 
+        return_tensors='pt'
+    )
 
     # Convert labels to tensors
     train_labels = torch.tensor(train_labels)
+    val_labels = torch.tensor(val_labels)
     test_labels = torch.tensor(test_labels)
 
+    # Create datasets
     train_dataset = RedditDataset(train_encodings, train_labels)
+    val_dataset = RedditDataset(val_encodings, val_labels)
     test_dataset = RedditDataset(test_encodings, test_labels)
 
+    # Compute class weights for weighted loss
+    class_counts = np.bincount(train_labels.numpy())
+    class_weights = 1.0 / (class_counts / np.sum(class_counts))
+    class_weights = torch.tensor(class_weights, dtype=torch.float)
+    
     # Create DataLoaders
-    label_array = train_labels.numpy()
-    class_sample_counts = np.bincount(label_array)
-    weights = 1.0 / class_sample_counts # inverse frequency
-    sample_weights = weights[label_array]
-    sampler = WeightedRandomSampler( # Account for class imbalance
-        weights=sample_weights,
-        num_samples=len(sample_weights),
-        replacement=True
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=16, 
+        shuffle=True,  # Use regular shuffling instead of weighted sampler
+        num_workers=4
     )
-    train_loader = DataLoader(train_dataset, batch_size=16, sampler=sampler, num_workers=4)
-
-    test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False, num_workers=4)
+    
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=16, 
+        shuffle=False, 
+        num_workers=4
+    )
+    
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=16, 
+        shuffle=False, 
+        num_workers=4
+    )
 
     print('Data preparation complete.')
+    print(f'Train samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}, Test samples: {len(test_dataset)}')
+    print(f'Class distribution in training set: {np.bincount(train_labels.numpy())}')
+    print(f'Class weights: {class_weights.numpy()}')
 
-    return train_loader, test_loader, label_encoder, train_labels, test_labels
+    return train_loader, val_loader, test_loader, label_encoder, class_weights
 
 
 def main():
+    # Set seed for reproducibility
+    set_seed(42)
     
     # Load the DataFrame
     df = get_df()
-
-    # Get the dataloaders
-    train_loader, test_loader, label_encoder, train_labels, test_labels = prepare_dataloaders(df)
+    
+    # Print dataset statistics
+    print(f"Total number of samples: {len(df)}")
+    print(f"Class distribution: {df['verdict'].value_counts()}")
+    
+    # Choose model (RoBERTa generally performs better than BERT for this type of task)
+    model_name = 'roberta-base'  # Change to 'bert-base-uncased' if you prefer BERT
+    
+    # Get the dataloaders with validation set
+    train_loader, val_loader, test_loader, label_encoder, class_weights = prepare_dataloaders(
+        df, model_name=model_name, max_length=256
+    )
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    print(f"Using device: {device}")
 
     # Initialize the model
-    model = BERTClassifier()
+    model = BERTClassifier(model_name=model_name, num_classes=len(label_encoder.classes_))
     model.to(device)
 
-    # Get unique classes and compute weights
-    class_weights = compute_class_weight(
-        class_weight='balanced',
-        classes=np.unique(train_labels.numpy()),
-        y=train_labels.numpy()
-    )
-    class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
+    # Freeze bert parameters initially (for first epoch)
+    for param in model.bert.parameters():
+        param.requires_grad = False
 
-    # Initialize optimizer, loss function, and scheduler
-    epochs = 8
+    # Initialize optimizer with weight decay
+    epochs = 5  # Reduce epochs with early stopping
     total_steps = len(train_loader) * epochs
     warmup_steps = int(0.1 * total_steps)
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
+    # Use different learning rates for different components
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in model.bert.named_parameters() if p.requires_grad], 'lr': 1e-5, 'weight_decay': 0.01},
+        {'params': [p for n, p in model.intermediate.named_parameters()], 'lr': 3e-4, 'weight_decay': 0.01},
+        {'params': [p for n, p in model.classifier.named_parameters()], 'lr': 3e-4, 'weight_decay': 0.01}
+    ]
+    
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters)
+    
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=warmup_steps,
         num_training_steps=total_steps
     )
+    
+    # Use class weights for loss function
+    class_weights = class_weights.to(device)
     loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
     print("Model and optimizer initialized.")
+    print(f"Training with {epochs} epochs, early stopping with patience=2")
 
-    # Train the model
-    for param in model.bert.parameters(): # Freeze BERT parameters initially
-        param.requires_grad = False
-
-    model.train_model(train_loader, optimizer, scheduler, loss_fn, device, epochs=8)
+    # Train the model with early stopping
+    model.train_model(
+        train_loader, 
+        optimizer, 
+        scheduler, 
+        loss_fn, 
+        device, 
+        epochs=epochs, 
+        eval_loader=val_loader,
+        patience=2  # Early stopping
+    )
     
     print("Training complete.")
 
+    # Load best model for final evaluation
+    model.load_state_dict(torch.load("best_bert_model.pth"))
+    
     # Evaluate the model
     predictions, true_labels, acc, f1 = model.evaluate_model(test_loader, device)
+    print(f"Test Accuracy: {acc:.4f}")
+    print(f"Test F1-Score: {f1:.4f}")
     print(classification_report(true_labels, predictions, target_names=label_encoder.classes_))
 
-    # Save the model
-    model.cpu()
-    torch.save(model.state_dict(), "bert_model.pth")
-    print("Model saved to bert_model.pth")
+    # Save the final model
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'label_encoder': label_encoder,
+        'model_name': model_name
+    }, "final_aita_model.pth")
+    print("Final model saved to final_aita_model.pth")
+
+
+def predict_aita_verdict(text, model_path="final_aita_model.pth"):
+    """Function to make predictions on new text"""
+    # Load the saved model
+    checkpoint = torch.load(model_path)
+    model_name = checkpoint.get('model_name', 'roberta-base')
+    label_encoder = checkpoint['label_encoder']
+    
+    # Initialize model
+    model = BERTClassifier(model_name=model_name, num_classes=len(label_encoder.classes_))
+    model.load_state_dict(checkpoint['model_state_dict'])
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    model.eval()
+    
+    # Preprocess and tokenize text
+    preprocessed_text = preprocess_text(text)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    encodings = tokenizer(
+        preprocessed_text, 
+        truncation=True, 
+        padding='max_length', 
+        max_length=256, 
+        return_tensors='pt'
+    )
+    
+    # Move to device
+    input_ids = encodings['input_ids'].to(device)
+    attention_mask = encodings['attention_mask'].to(device)
+    
+    # Handle token_type_ids if present
+    token_type_ids = encodings.get('token_type_ids')
+    if token_type_ids is not None:
+        token_type_ids = token_type_ids.to(device)
+        outputs = model(input_ids, attention_mask, token_type_ids)
+    else:
+        outputs = model(input_ids, attention_mask)
+    
+    # Get prediction
+    probs = F.softmax(outputs, dim=1)
+    confidence, prediction = torch.max(probs, dim=1)
+    
+    verdict = label_encoder.inverse_transform([prediction.item()])[0]
+    confidence = confidence.item()
+    
+    # Get all class probabilities
+    all_probs = probs[0].cpu().detach().numpy()
+    class_probs = {label_encoder.inverse_transform([i])[0]: float(prob) 
+                  for i, prob in enumerate(all_probs)}
+    
+    return {
+        'verdict': verdict,
+        'confidence': confidence,
+        'class_probabilities': class_probs
+    }
+
 
 if __name__ == "__main__":
     main()
