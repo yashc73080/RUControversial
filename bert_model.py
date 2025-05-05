@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 
-from transformers import BertModel, BertTokenizer
+from transformers import BertModel, BertTokenizer, get_linear_schedule_with_warmup
 
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
@@ -34,9 +34,14 @@ class BERTClassifier(nn.Module):
 
         return self.classifier(x)
     
-    def train_model(self, train_loader, optimizer, loss_fn, device, epochs=3):
+    def train_model(self, train_loader, optimizer, scheduler, loss_fn, device, epochs=3):
         self.train()
         for epoch in range(epochs): 
+            # Unfreeze BERT parameters after the first epoch
+            if epoch == 1:
+                for param in self.bert.parameters():
+                    param.requires_grad = True
+
             loop = tqdm(train_loader, leave=True)
             for batch in loop:
                 optimizer.zero_grad()
@@ -49,6 +54,7 @@ class BERTClassifier(nn.Module):
                 loss = loss_fn(outputs, labels)
                 loss.backward()
                 optimizer.step()
+                scheduler.step()
 
                 loop.set_description(f'Epoch {epoch}')
                 loop.set_postfix(loss=loss.item())
@@ -139,7 +145,17 @@ def prepare_dataloaders(df):
     test_dataset = RedditDataset(test_encodings, test_labels)
 
     # Create DataLoaders
-    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4)
+    label_array = train_labels.numpy()
+    class_sample_counts = np.bincount(label_array)
+    weights = 1.0 / class_sample_counts # inverse frequency
+    sample_weights = weights[label_array]
+    sampler = WeightedRandomSampler( # Account for class imbalance
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+    train_loader = DataLoader(train_dataset, batch_size=16, sampler=sampler, num_workers=4)
+
     test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False, num_workers=4)
 
     return train_loader, test_loader, label_encoder, train_labels, test_labels
@@ -167,12 +183,24 @@ def main():
     )
     class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
 
-    # Initialize optimizer and loss function
+    # Initialize optimizer, loss function, and scheduler
+    epochs = 8
+    total_steps = len(train_loader) * epochs
+    warmup_steps = int(0.1 * total_steps)
+    
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps
+    )
     loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
     # Train the model
-    model.train_model(train_loader, optimizer, loss_fn, device, epochs=8)
+    for param in model.bert.parameters(): # Freeze BERT parameters initially
+        param.requires_grad = False
+
+    model.train_model(train_loader, optimizer, scheduler, loss_fn, device, epochs=8)
 
     # Evaluate the model
     predictions, true_labels, acc, f1 = model.evaluate_model(test_loader, device)
