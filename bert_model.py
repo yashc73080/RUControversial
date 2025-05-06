@@ -181,6 +181,17 @@ class RedditDataset(Dataset):
         item['labels'] = self.labels[idx]
         return item
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=None, gamma=2.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha  # Class weights
+        self.gamma = gamma  # Focusing parameter
+        
+    def forward(self, inputs, targets):
+        BCE_loss = F.cross_entropy(inputs, targets, reduction='none', weight=self.alpha)
+        pt = torch.exp(-BCE_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * BCE_loss
+        return focal_loss.mean()
 
 def preprocess_text(text):
     """Clean and preprocess text data."""
@@ -199,7 +210,6 @@ def preprocess_text(text):
         
         return text
     return ""
-
 
 def get_df():
     load_dotenv()
@@ -231,7 +241,6 @@ def get_df():
     df = df[df['combined_text'].str.len() > 10]  # Remove very short posts
     
     return df
-
 
 def prepare_dataloaders(df, model_name='roberta-base', max_length=256, val_size=0.1):
     label_encoder = LabelEncoder()
@@ -292,9 +301,17 @@ def prepare_dataloaders(df, model_name='roberta-base', max_length=256, val_size=
     test_dataset = RedditDataset(test_encodings, test_labels)
 
     # Compute class weights for weighted loss
-    class_counts = np.bincount(train_labels.numpy())
-    class_weights = 1.0 / (class_counts / np.sum(class_counts))
-    class_weights = torch.tensor(class_weights, dtype=torch.float)
+    # class_counts = np.bincount(train_labels.numpy())
+    # class_weights = 1.0 / (class_counts / np.sum(class_counts))
+    # class_weights = torch.tensor(class_weights, dtype=torch.float)
+
+    # Direct weight assignment based on observed performance
+    class_weights = torch.tensor([
+        6.0,  # "asshole"
+        25.0, # "everyone sucks" - highest weight due to poorest detection
+        15.0, # "no assholes here"
+        1.5   # "not the asshole"
+    ], dtype=torch.float)
     
     # Create DataLoaders
     train_loader = DataLoader( train_dataset, batch_size=16, shuffle=True, num_workers=4 )
@@ -364,6 +381,7 @@ def predict_aita_verdict(text, model_path="final_aita_model.pth"):
         'class_probabilities': class_probs
     }
 
+
 def main():
     # Set seed for reproducibility
     set_seed(42)
@@ -376,7 +394,7 @@ def main():
     print(f"Class distribution: {df['verdict'].value_counts()}")
     
     # Choose model
-    model_name = 'microsoft/deberta-v3-base'
+    model_name = 'microsoft/deberta-v3-small'
     
     # Get the dataloaders with validation set
     train_loader, val_loader, test_loader, label_encoder, class_weights = prepare_dataloaders(
@@ -416,10 +434,10 @@ def main():
     
     # Use class weights for loss function
     class_weights = class_weights.to(device)
-    loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+    loss_fn = FocalLoss(alpha=class_weights.to(device), gamma=2.0)
 
     print("Model and optimizer initialized.")
-    print(f"Training with {epochs} epochs, early stopping with patience=2")
+    print(f"Training with {epochs} epochs, early stopping with patience=1")
 
     # Train the model with early stopping
     model.train_model(
@@ -430,7 +448,7 @@ def main():
         device, 
         epochs=epochs, 
         eval_loader=val_loader,
-        patience=2  # Early stopping
+        patience=1  # Early stopping
     )
     
     print("Training complete.")
