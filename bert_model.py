@@ -376,7 +376,7 @@ def main():
     print(f"Class distribution: {df['verdict'].value_counts()}")
     
     # Choose model
-    model_name = 'google/electra-base-discriminator'
+    model_name = 'microsoft/deberta-v3-base'
     
     # Get the dataloaders with validation set
     train_loader, val_loader, test_loader, label_encoder, class_weights = prepare_dataloaders(
