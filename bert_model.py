@@ -297,26 +297,9 @@ def prepare_dataloaders(df, model_name='roberta-base', max_length=256, val_size=
     class_weights = torch.tensor(class_weights, dtype=torch.float)
     
     # Create DataLoaders
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=16, 
-        shuffle=True,  # Use regular shuffling instead of weighted sampler
-        num_workers=4
-    )
-    
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=16, 
-        shuffle=False, 
-        num_workers=4
-    )
-    
-    test_loader = DataLoader(
-        test_dataset, 
-        batch_size=16, 
-        shuffle=False, 
-        num_workers=4
-    )
+    train_loader = DataLoader( train_dataset, batch_size=16, shuffle=True, num_workers=4 )
+    val_loader = DataLoader( val_dataset, batch_size=16, shuffle=False, num_workers=4 )
+    test_loader = DataLoader( test_dataset, batch_size=16, shuffle=False, num_workers=4 )
 
     print('Data preparation complete.')
     print(f'Train samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}, Test samples: {len(test_dataset)}')
@@ -325,6 +308,61 @@ def prepare_dataloaders(df, model_name='roberta-base', max_length=256, val_size=
 
     return train_loader, val_loader, test_loader, label_encoder, class_weights
 
+def predict_aita_verdict(text, model_path="final_aita_model.pth"):
+    """Function to make predictions on new text"""
+    # Load the saved model
+    checkpoint = torch.load(model_path)
+    model_name = checkpoint.get('model_name', 'roberta-base')
+    label_encoder = checkpoint['label_encoder']
+    
+    # Initialize model
+    model = BERTClassifier(model_name=model_name, num_classes=len(label_encoder.classes_))
+    model.load_state_dict(checkpoint['model_state_dict'])
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    model.eval()
+    
+    # Preprocess and tokenize text
+    preprocessed_text = preprocess_text(text)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    encodings = tokenizer(
+        preprocessed_text, 
+        truncation=True, 
+        padding='max_length', 
+        max_length=256, 
+        return_tensors='pt'
+    )
+    
+    # Move to device
+    input_ids = encodings['input_ids'].to(device)
+    attention_mask = encodings['attention_mask'].to(device)
+    
+    # Handle token_type_ids if present
+    token_type_ids = encodings.get('token_type_ids')
+    if token_type_ids is not None:
+        token_type_ids = token_type_ids.to(device)
+        outputs = model(input_ids, attention_mask, token_type_ids)
+    else:
+        outputs = model(input_ids, attention_mask)
+    
+    # Get prediction
+    probs = F.softmax(outputs, dim=1)
+    confidence, prediction = torch.max(probs, dim=1)
+    
+    verdict = label_encoder.inverse_transform([prediction.item()])[0]
+    confidence = confidence.item()
+    
+    # Get all class probabilities
+    all_probs = probs[0].cpu().detach().numpy()
+    class_probs = {label_encoder.inverse_transform([i])[0]: float(prob) 
+                  for i, prob in enumerate(all_probs)}
+    
+    return {
+        'verdict': verdict,
+        'confidence': confidence,
+        'class_probabilities': class_probs
+    }
 
 def main():
     # Set seed for reproducibility
@@ -337,8 +375,8 @@ def main():
     print(f"Total number of samples: {len(df)}")
     print(f"Class distribution: {df['verdict'].value_counts()}")
     
-    # Choose model (RoBERTa generally performs better than BERT for this type of task)
-    model_name = 'roberta-base'  # Change to 'bert-base-uncased' if you prefer BERT
+    # Choose model
+    model_name = 'google/electra-base-discriminator'
     
     # Get the dataloaders with validation set
     train_loader, val_loader, test_loader, label_encoder, class_weights = prepare_dataloaders(
@@ -413,64 +451,6 @@ def main():
         'model_name': model_name
     }, "final_aita_model.pth")
     print("Final model saved to final_aita_model.pth")
-
-
-def predict_aita_verdict(text, model_path="final_aita_model.pth"):
-    """Function to make predictions on new text"""
-    # Load the saved model
-    checkpoint = torch.load(model_path)
-    model_name = checkpoint.get('model_name', 'roberta-base')
-    label_encoder = checkpoint['label_encoder']
-    
-    # Initialize model
-    model = BERTClassifier(model_name=model_name, num_classes=len(label_encoder.classes_))
-    model.load_state_dict(checkpoint['model_state_dict'])
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
-    model.eval()
-    
-    # Preprocess and tokenize text
-    preprocessed_text = preprocess_text(text)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    encodings = tokenizer(
-        preprocessed_text, 
-        truncation=True, 
-        padding='max_length', 
-        max_length=256, 
-        return_tensors='pt'
-    )
-    
-    # Move to device
-    input_ids = encodings['input_ids'].to(device)
-    attention_mask = encodings['attention_mask'].to(device)
-    
-    # Handle token_type_ids if present
-    token_type_ids = encodings.get('token_type_ids')
-    if token_type_ids is not None:
-        token_type_ids = token_type_ids.to(device)
-        outputs = model(input_ids, attention_mask, token_type_ids)
-    else:
-        outputs = model(input_ids, attention_mask)
-    
-    # Get prediction
-    probs = F.softmax(outputs, dim=1)
-    confidence, prediction = torch.max(probs, dim=1)
-    
-    verdict = label_encoder.inverse_transform([prediction.item()])[0]
-    confidence = confidence.item()
-    
-    # Get all class probabilities
-    all_probs = probs[0].cpu().detach().numpy()
-    class_probs = {label_encoder.inverse_transform([i])[0]: float(prob) 
-                  for i, prob in enumerate(all_probs)}
-    
-    return {
-        'verdict': verdict,
-        'confidence': confidence,
-        'class_probabilities': class_probs
-    }
-
 
 if __name__ == "__main__":
     main()
