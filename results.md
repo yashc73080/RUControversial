@@ -223,3 +223,47 @@ optimizer_grouped_parameters = [
 ]
 
 **Failed**
+
+
+# Final:
+train_deberta_small_20250507_154811.43544220.o
+Connection successful!
+Total number of samples: 19722
+Class distribution: verdict
+not the asshole     12562
+asshole              4183
+no assholes here     1897
+everyone sucks       1080
+Name: count, dtype: int64
+Data preparation complete.
+Train samples: 13804, Validation samples: 1973, Test samples: 3945
+Class distribution in training set: [2928  756 1328 8792]
+Class weights: [ 6.  25.  15.   1.5]
+Using device: cuda
+Model and optimizer initialized.
+Training with 5 epochs, early stopping with patience=1
+Epoch 1/5 - Avg training loss: 6.8539
+Validation - Accuracy: 0.2119, F1: 0.0741
+New best model saved with F1: 0.0741
+Unfreezing encoder parameters...
+Epoch 2/5 - Avg training loss: 6.7509
+Validation - Accuracy: 0.6097, F1: 0.5110
+New best model saved with F1: 0.5110
+Epoch 3/5 - Avg training loss: 6.6894
+Validation - Accuracy: 0.2119, F1: 0.0741
+Early stopping triggered after 3 epochs
+Training complete.
+Test Accuracy: 0.6200
+Test F1-Score: 0.5186
+                  precision    recall  f1-score   support
+
+         asshole       0.32      0.10      0.15       837
+  everyone sucks       0.00      0.00      0.00       216
+no assholes here       0.00      0.00      0.00       379
+ not the asshole       0.64      0.94      0.76      2513
+
+        accuracy                           0.62      3945
+       macro avg       0.24      0.26      0.23      3945
+    weighted avg       0.48      0.62      0.52      3945
+
+Final model saved to final_aita_model.pth

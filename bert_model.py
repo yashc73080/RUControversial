@@ -4,14 +4,13 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import Dataset, DataLoader
 
-from transformers import BertModel, BertTokenizer, get_linear_schedule_with_warmup, AutoModel, AutoTokenizer
+from transformers import get_linear_schedule_with_warmup, AutoModel, AutoTokenizer
 
 from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, f1_score, classification_report
-from sklearn.utils.class_weight import compute_class_weight
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
@@ -300,11 +299,6 @@ def prepare_dataloaders(df, model_name='roberta-base', max_length=256, val_size=
     val_dataset = RedditDataset(val_encodings, val_labels)
     test_dataset = RedditDataset(test_encodings, test_labels)
 
-    # Compute class weights for weighted loss
-    # class_counts = np.bincount(train_labels.numpy())
-    # class_weights = 1.0 / (class_counts / np.sum(class_counts))
-    # class_weights = torch.tensor(class_weights, dtype=torch.float)
-
     # Direct weight assignment based on observed performance
     class_weights = torch.tensor([
         6.0,  # "asshole"
@@ -324,62 +318,6 @@ def prepare_dataloaders(df, model_name='roberta-base', max_length=256, val_size=
     print(f'Class weights: {class_weights.numpy()}')
 
     return train_loader, val_loader, test_loader, label_encoder, class_weights
-
-def predict_aita_verdict(text, model_path="final_aita_model.pth"):
-    """Function to make predictions on new text"""
-    # Load the saved model
-    checkpoint = torch.load(model_path)
-    model_name = checkpoint.get('model_name', 'roberta-base')
-    label_encoder = checkpoint['label_encoder']
-    
-    # Initialize model
-    model = BERTClassifier(model_name=model_name, num_classes=len(label_encoder.classes_))
-    model.load_state_dict(checkpoint['model_state_dict'])
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
-    model.eval()
-    
-    # Preprocess and tokenize text
-    preprocessed_text = preprocess_text(text)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    encodings = tokenizer(
-        preprocessed_text, 
-        truncation=True, 
-        padding='max_length', 
-        max_length=256, 
-        return_tensors='pt'
-    )
-    
-    # Move to device
-    input_ids = encodings['input_ids'].to(device)
-    attention_mask = encodings['attention_mask'].to(device)
-    
-    # Handle token_type_ids if present
-    token_type_ids = encodings.get('token_type_ids')
-    if token_type_ids is not None:
-        token_type_ids = token_type_ids.to(device)
-        outputs = model(input_ids, attention_mask, token_type_ids)
-    else:
-        outputs = model(input_ids, attention_mask)
-    
-    # Get prediction
-    probs = F.softmax(outputs, dim=1)
-    confidence, prediction = torch.max(probs, dim=1)
-    
-    verdict = label_encoder.inverse_transform([prediction.item()])[0]
-    confidence = confidence.item()
-    
-    # Get all class probabilities
-    all_probs = probs[0].cpu().detach().numpy()
-    class_probs = {label_encoder.inverse_transform([i])[0]: float(prob) 
-                  for i, prob in enumerate(all_probs)}
-    
-    return {
-        'verdict': verdict,
-        'confidence': confidence,
-        'class_probabilities': class_probs
-    }
 
 
 def main():
@@ -463,6 +401,7 @@ def main():
     print(classification_report(true_labels, predictions, target_names=label_encoder.classes_))
 
     # Save the final model
+    model.cpu()
     torch.save({
         'model_state_dict': model.state_dict(),
         'label_encoder': label_encoder,

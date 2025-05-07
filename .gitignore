@@ -2,3 +2,4 @@
 Data/*
 *.csv
 *.pth
+__pycache__/*
