@@ -319,6 +319,81 @@ def prepare_dataloaders(df, model_name='roberta-base', max_length=256, val_size=
 
     return train_loader, val_loader, test_loader, label_encoder, class_weights
 
+def load_bert_model(model_path="../final_aita_model.pth"):
+    """Load and initialize the BERT model"""
+    # Load the saved model with map_location to ensure compatibility with CPU
+    checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
+    model_name = checkpoint.get('model_name', 'roberta-base')
+    label_encoder = checkpoint['label_encoder']
+    
+    # Initialize model
+    model = BERTClassifier(model_name=model_name, num_classes=len(label_encoder.classes_))
+    model.load_state_dict(checkpoint['model_state_dict'])
+    print('Loaded model:', model_name)
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    model.eval()
+    
+    # Also load and initialize tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    
+    return {
+        'model': model,
+        'tokenizer': tokenizer,
+        'label_encoder': label_encoder,
+        'device': device
+    }
+
+def predict_with_model(text, loaded_model):
+    """Make predictions with already loaded model"""
+    model = loaded_model['model']
+    tokenizer = loaded_model['tokenizer']
+    label_encoder = loaded_model['label_encoder']
+    device = loaded_model['device']
+    
+    # Preprocess text
+    preprocessed_text = preprocess_text(text)
+    
+    # Tokenize
+    encodings = tokenizer(
+        preprocessed_text, 
+        truncation=True, 
+        padding='max_length', 
+        max_length=768, 
+        return_tensors='pt'
+    )
+    
+    # Move to device
+    input_ids = encodings['input_ids'].to(device)
+    attention_mask = encodings['attention_mask'].to(device)
+    
+    # Handle token_type_ids if present
+    token_type_ids = encodings.get('token_type_ids')
+    if token_type_ids is not None:
+        token_type_ids = token_type_ids.to(device)
+        outputs = model(input_ids, attention_mask, token_type_ids)
+    else:
+        outputs = model(input_ids, attention_mask)
+    
+    # Get prediction
+    print('Predicting...')
+    probs = F.softmax(outputs, dim=1)
+    confidence, prediction = torch.max(probs, dim=1)
+    
+    verdict = label_encoder.inverse_transform([prediction.item()])[0]
+    confidence = confidence.item()
+    
+    # Get all class probabilities
+    all_probs = probs[0].cpu().detach().numpy()
+    class_probs = {label_encoder.inverse_transform([i])[0]: float(prob) 
+                  for i, prob in enumerate(all_probs)}
+    
+    return {
+        'verdict': verdict,
+        'confidence': confidence,
+        'class_probabilities': class_probs
+    }
 
 def main():
     # Set seed for reproducibility
@@ -336,7 +411,7 @@ def main():
     
     # Get the dataloaders with validation set
     train_loader, val_loader, test_loader, label_encoder, class_weights = prepare_dataloaders(
-        df, model_name=model_name, max_length=256
+        df, model_name=model_name, max_length=768
     )
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -353,7 +428,7 @@ def main():
     # Initialize optimizer with weight decay
     epochs = 5  # Reduce epochs with early stopping
     total_steps = len(train_loader) * epochs
-    warmup_steps = int(0.1 * total_steps)
+    warmup_steps = int(0.15 * total_steps)
     
     # Use different learning rates for different components
     optimizer_grouped_parameters = [
