@@ -4,14 +4,13 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import Dataset, DataLoader
 
-from transformers import BertModel, BertTokenizer, get_linear_schedule_with_warmup, AutoModel, AutoTokenizer
+from transformers import get_linear_schedule_with_warmup, AutoModel, AutoTokenizer
 
 from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, f1_score, classification_report
-from sklearn.utils.class_weight import compute_class_weight
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
@@ -181,6 +180,17 @@ class RedditDataset(Dataset):
         item['labels'] = self.labels[idx]
         return item
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=None, gamma=2.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha  # Class weights
+        self.gamma = gamma  # Focusing parameter
+        
+    def forward(self, inputs, targets):
+        BCE_loss = F.cross_entropy(inputs, targets, reduction='none', weight=self.alpha)
+        pt = torch.exp(-BCE_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * BCE_loss
+        return focal_loss.mean()
 
 def preprocess_text(text):
     """Clean and preprocess text data."""
@@ -199,7 +209,6 @@ def preprocess_text(text):
         
         return text
     return ""
-
 
 def get_df():
     load_dotenv()
@@ -231,7 +240,6 @@ def get_df():
     df = df[df['combined_text'].str.len() > 10]  # Remove very short posts
     
     return df
-
 
 def prepare_dataloaders(df, model_name='roberta-base', max_length=256, val_size=0.1):
     label_encoder = LabelEncoder()
@@ -291,32 +299,18 @@ def prepare_dataloaders(df, model_name='roberta-base', max_length=256, val_size=
     val_dataset = RedditDataset(val_encodings, val_labels)
     test_dataset = RedditDataset(test_encodings, test_labels)
 
-    # Compute class weights for weighted loss
-    class_counts = np.bincount(train_labels.numpy())
-    class_weights = 1.0 / (class_counts / np.sum(class_counts))
-    class_weights = torch.tensor(class_weights, dtype=torch.float)
+    # Direct weight assignment based on observed performance
+    class_weights = torch.tensor([
+        6.0,  # "asshole"
+        25.0, # "everyone sucks" - highest weight due to poorest detection
+        15.0, # "no assholes here"
+        1.5   # "not the asshole"
+    ], dtype=torch.float)
     
     # Create DataLoaders
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=16, 
-        shuffle=True,  # Use regular shuffling instead of weighted sampler
-        num_workers=4
-    )
-    
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=16, 
-        shuffle=False, 
-        num_workers=4
-    )
-    
-    test_loader = DataLoader(
-        test_dataset, 
-        batch_size=16, 
-        shuffle=False, 
-        num_workers=4
-    )
+    train_loader = DataLoader( train_dataset, batch_size=16, shuffle=True, num_workers=4 )
+    val_loader = DataLoader( val_dataset, batch_size=16, shuffle=False, num_workers=4 )
+    test_loader = DataLoader( test_dataset, batch_size=16, shuffle=False, num_workers=4 )
 
     print('Data preparation complete.')
     print(f'Train samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}, Test samples: {len(test_dataset)}')
@@ -325,114 +319,43 @@ def prepare_dataloaders(df, model_name='roberta-base', max_length=256, val_size=
 
     return train_loader, val_loader, test_loader, label_encoder, class_weights
 
-
-def main():
-    # Set seed for reproducibility
-    set_seed(42)
-    
-    # Load the DataFrame
-    df = get_df()
-    
-    # Print dataset statistics
-    print(f"Total number of samples: {len(df)}")
-    print(f"Class distribution: {df['verdict'].value_counts()}")
-    
-    # Choose model (RoBERTa generally performs better than BERT for this type of task)
-    model_name = 'roberta-base'  # Change to 'bert-base-uncased' if you prefer BERT
-    
-    # Get the dataloaders with validation set
-    train_loader, val_loader, test_loader, label_encoder, class_weights = prepare_dataloaders(
-        df, model_name=model_name, max_length=256
-    )
-
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-    print(f"Using device: {device}")
-
-    # Initialize the model
-    model = BERTClassifier(model_name=model_name, num_classes=len(label_encoder.classes_))
-    model.to(device)
-
-    # Freeze bert parameters initially (for first epoch)
-    for param in model.bert.parameters():
-        param.requires_grad = False
-
-    # Initialize optimizer with weight decay
-    epochs = 5  # Reduce epochs with early stopping
-    total_steps = len(train_loader) * epochs
-    warmup_steps = int(0.1 * total_steps)
-    
-    # Use different learning rates for different components
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in model.bert.named_parameters() if p.requires_grad], 'lr': 1e-5, 'weight_decay': 0.01},
-        {'params': [p for n, p in model.intermediate.named_parameters()], 'lr': 3e-4, 'weight_decay': 0.01},
-        {'params': [p for n, p in model.classifier.named_parameters()], 'lr': 3e-4, 'weight_decay': 0.01}
-    ]
-    
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters)
-    
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps
-    )
-    
-    # Use class weights for loss function
-    class_weights = class_weights.to(device)
-    loss_fn = nn.CrossEntropyLoss(weight=class_weights)
-
-    print("Model and optimizer initialized.")
-    print(f"Training with {epochs} epochs, early stopping with patience=2")
-
-    # Train the model with early stopping
-    model.train_model(
-        train_loader, 
-        optimizer, 
-        scheduler, 
-        loss_fn, 
-        device, 
-        epochs=epochs, 
-        eval_loader=val_loader,
-        patience=2  # Early stopping
-    )
-    
-    print("Training complete.")
-
-    # Load best model for final evaluation
-    model.load_state_dict(torch.load("best_bert_model.pth"))
-    
-    # Evaluate the model
-    predictions, true_labels, acc, f1 = model.evaluate_model(test_loader, device)
-    print(f"Test Accuracy: {acc:.4f}")
-    print(f"Test F1-Score: {f1:.4f}")
-    print(classification_report(true_labels, predictions, target_names=label_encoder.classes_))
-
-    # Save the final model
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'label_encoder': label_encoder,
-        'model_name': model_name
-    }, "final_aita_model.pth")
-    print("Final model saved to final_aita_model.pth")
-
-
-def predict_aita_verdict(text, model_path="final_aita_model.pth"):
-    """Function to make predictions on new text"""
-    # Load the saved model
-    checkpoint = torch.load(model_path)
+def load_bert_model(model_path="../final_aita_model.pth"):
+    """Load and initialize the BERT model"""
+    # Load the saved model with map_location to ensure compatibility with CPU
+    checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
     model_name = checkpoint.get('model_name', 'roberta-base')
     label_encoder = checkpoint['label_encoder']
     
     # Initialize model
     model = BERTClassifier(model_name=model_name, num_classes=len(label_encoder.classes_))
     model.load_state_dict(checkpoint['model_state_dict'])
+    print('Loaded model:', model_name)
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
     model.eval()
     
-    # Preprocess and tokenize text
-    preprocessed_text = preprocess_text(text)
+    # Also load and initialize tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    
+    return {
+        'model': model,
+        'tokenizer': tokenizer,
+        'label_encoder': label_encoder,
+        'device': device
+    }
+
+def predict_with_model(text, loaded_model):
+    """Make predictions with already loaded model"""
+    model = loaded_model['model']
+    tokenizer = loaded_model['tokenizer']
+    label_encoder = loaded_model['label_encoder']
+    device = loaded_model['device']
+    
+    # Preprocess text
+    preprocessed_text = preprocess_text(text)
+    
+    # Tokenize
     encodings = tokenizer(
         preprocessed_text, 
         truncation=True, 
@@ -454,6 +377,7 @@ def predict_aita_verdict(text, model_path="final_aita_model.pth"):
         outputs = model(input_ids, attention_mask)
     
     # Get prediction
+    print('Predicting...')
     probs = F.softmax(outputs, dim=1)
     confidence, prediction = torch.max(probs, dim=1)
     
@@ -471,6 +395,94 @@ def predict_aita_verdict(text, model_path="final_aita_model.pth"):
         'class_probabilities': class_probs
     }
 
+def main():
+    # Set seed for reproducibility
+    set_seed(42)
+    
+    # Load the DataFrame
+    df = get_df()
+    
+    # Print dataset statistics
+    print(f"Total number of samples: {len(df)}")
+    print(f"Class distribution: {df['verdict'].value_counts()}")
+    
+    # Choose model
+    model_name = 'microsoft/deberta-v3-small'
+    
+    # Get the dataloaders with validation set
+    train_loader, val_loader, test_loader, label_encoder, class_weights = prepare_dataloaders(
+        df, model_name=model_name, max_length=256
+    )
+
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    print(f"Using device: {device}")
+
+    # Initialize the model
+    model = BERTClassifier(model_name=model_name, num_classes=len(label_encoder.classes_))
+    model.to(device)
+
+    # Freeze bert parameters initially (for first epoch)
+    for param in model.bert.parameters():
+        param.requires_grad = False
+
+    # Initialize optimizer with weight decay
+    epochs = 5  # Reduce epochs with early stopping
+    total_steps = len(train_loader) * epochs
+    warmup_steps = int(0.15 * total_steps)
+    
+    # Use different learning rates for different components
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in model.bert.named_parameters() if p.requires_grad], 'lr': 1e-5, 'weight_decay': 0.01},
+        {'params': [p for n, p in model.intermediate.named_parameters()], 'lr': 3e-4, 'weight_decay': 0.01},
+        {'params': [p for n, p in model.classifier.named_parameters()], 'lr': 3e-4, 'weight_decay': 0.01}
+    ]
+    
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters)
+    
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps
+    )
+    
+    # Use class weights for loss function
+    class_weights = class_weights.to(device)
+    loss_fn = FocalLoss(alpha=class_weights.to(device), gamma=2.0)
+
+    print("Model and optimizer initialized.")
+    print(f"Training with {epochs} epochs, early stopping with patience=1")
+
+    # Train the model with early stopping
+    model.train_model(
+        train_loader, 
+        optimizer, 
+        scheduler, 
+        loss_fn, 
+        device, 
+        epochs=epochs, 
+        eval_loader=val_loader,
+        patience=1  # Early stopping
+    )
+    
+    print("Training complete.")
+
+    # Load best model for final evaluation
+    model.load_state_dict(torch.load("best_bert_model.pth"))
+    
+    # Evaluate the model
+    predictions, true_labels, acc, f1 = model.evaluate_model(test_loader, device)
+    print(f"Test Accuracy: {acc:.4f}")
+    print(f"Test F1-Score: {f1:.4f}")
+    print(classification_report(true_labels, predictions, target_names=label_encoder.classes_))
+
+    # Save the final model
+    model.cpu()
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'label_encoder': label_encoder,
+        'model_name': model_name
+    }, "final_aita_model.pth")
+    print("Final model saved to final_aita_model.pth")
 
 if __name__ == "__main__":
     main()

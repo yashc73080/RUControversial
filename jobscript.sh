@@ -2,7 +2,7 @@
 
 # Export the current date and time for job labeling
 export DATE=$(date +%Y%m%d_%H%M%S)
-export LABEL="RUControversial"
+export LABEL="${1:-RUControversial}"
 export JOB_NAME=train_"$LABEL"_"$DATE"
 
 # Environment variables to optimize performance
