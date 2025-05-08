@@ -461,7 +461,7 @@ def predict_with_model(text, loaded_model):
         preprocessed_text, 
         truncation=True, 
         padding='max_length', 
-        max_length=256, 
+        max_length=500, 
         return_tensors='pt'
     )
     
@@ -528,7 +528,7 @@ def main():
     
     # Get the dataloaders with validation set
     train_loader, val_loader, test_loader, label_encoder, class_weights = prepare_dataloaders(
-        df, model_name=model_name, max_length=256
+        df, model_name=model_name, max_length=500
     )
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
