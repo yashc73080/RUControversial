@@ -20,6 +20,7 @@ import os
 import re
 import numpy as np
 import random
+import json
 
 
 def set_seed(seed_value=42):
@@ -33,7 +34,7 @@ def set_seed(seed_value=42):
 
 
 class BERTClassifier(nn.Module):
-    def __init__(self, model_name='roberta-base', num_classes=4, dropout=0.3):
+    def __init__(self, model_name='microsoft/deberta-v3-small', num_classes=4, dropout=0.3):
         super(BERTClassifier, self).__init__()
         self.bert = AutoModel.from_pretrained(model_name)
         self.dropout = nn.Dropout(dropout)
@@ -71,11 +72,20 @@ class BERTClassifier(nn.Module):
         best_f1 = 0
         patience_counter = 0
         
+        # Initialize lists to store metrics
+        train_losses = []
+        train_accuracies = []
+        val_losses = []
+        val_accuracies = []
+        val_f1_scores = []
+        
         for epoch in range(epochs):
             # Training phase
             self.train()
             total_loss = 0
             total_steps = 0
+            epoch_predictions = []
+            epoch_true_labels = []
             
             # Only unfreeze BERT parameters after first epoch
             if epoch == 1:
@@ -105,6 +115,11 @@ class BERTClassifier(nn.Module):
                 # Gradient clipping
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                 
+                # Track predictions for accuracy calculation
+                _, preds = torch.max(outputs, dim=1)
+                epoch_predictions.extend(preds.cpu().numpy())
+                epoch_true_labels.extend(labels.cpu().numpy())
+                
                 optimizer.step()
                 scheduler.step()
                 
@@ -114,13 +129,48 @@ class BERTClassifier(nn.Module):
                 loop.set_description(f'Epoch {epoch+1}/{epochs}')
                 loop.set_postfix(loss=loss.item())
             
+            # Calculate training metrics for this epoch
             avg_train_loss = total_loss / total_steps
-            print(f"Epoch {epoch+1}/{epochs} - Avg training loss: {avg_train_loss:.4f}")
+            train_acc = accuracy_score(epoch_true_labels, epoch_predictions)
+            train_losses.append(avg_train_loss)
+            train_accuracies.append(train_acc)
+            
+            print(f"Epoch {epoch+1}/{epochs} - Avg training loss: {avg_train_loss:.4f}, Accuracy: {train_acc:.4f}")
             
             # Evaluation phase
             if eval_loader:
+                # Track validation loss
+                self.eval()
+                val_loss = 0
+                val_steps = 0
+                
+                with torch.no_grad():
+                    for batch in eval_loader:
+                        input_ids = batch['input_ids'].to(device)
+                        attention_mask = batch['attention_mask'].to(device)
+                        labels = batch['labels'].to(device)
+                        
+                        token_type_ids = batch.get('token_type_ids')
+                        if token_type_ids is not None:
+                            token_type_ids = token_type_ids.to(device)
+                            outputs = self(input_ids, attention_mask, token_type_ids)
+                        else:
+                            outputs = self(input_ids, attention_mask)
+                        
+                        loss = loss_fn(outputs, labels)
+                        val_loss += loss.item()
+                        val_steps += 1
+                
+                # Calculate validation metrics
+                avg_val_loss = val_loss / val_steps
+                val_losses.append(avg_val_loss)
+                
+                # Get standard evaluation metrics
                 _, _, eval_acc, eval_f1 = self.evaluate_model(eval_loader, device)
-                print(f"Validation - Accuracy: {eval_acc:.4f}, F1: {eval_f1:.4f}")
+                val_accuracies.append(eval_acc)
+                val_f1_scores.append(eval_f1)
+                
+                print(f"Validation - Loss: {avg_val_loss:.4f}, Accuracy: {eval_acc:.4f}, F1: {eval_f1:.4f}")
                 
                 # Early stopping logic
                 if eval_f1 > best_f1:
@@ -135,7 +185,17 @@ class BERTClassifier(nn.Module):
                         print(f"Early stopping triggered after {epoch+1} epochs")
                         # Load the best model
                         self.load_state_dict(torch.load("best_bert_model.pth"))
-                        return
+                        break
+        
+        # Return all collected metrics
+        metrics = {
+            'train_losses': train_losses,
+            'train_accuracies': train_accuracies,
+            'val_losses': val_losses,
+            'val_accuracies': val_accuracies,
+            'val_f1_scores': val_f1_scores
+        }
+        return metrics
 
     def evaluate_model(self, test_loader, device):
         self.eval()
@@ -453,7 +513,7 @@ def main():
     print(f"Training with {epochs} epochs, early stopping with patience=1")
 
     # Train the model with early stopping
-    model.train_model(
+    training_metrics = model.train_model(
         train_loader, 
         optimizer, 
         scheduler, 
@@ -483,6 +543,25 @@ def main():
         'model_name': model_name
     }, "final_aita_model.pth")
     print("Final model saved to final_aita_model.pth")
+
+    
+    metrics_data = {
+        'predictions': predictions.tolist(),
+        'true_labels': true_labels.tolist(),
+        'test_accuracy': acc,
+        'test_f1': f1,
+        'training_metrics': {
+            'train_losses': [float(x) for x in training_metrics['train_losses']],
+            'train_accuracies': [float(x) for x in training_metrics['train_accuracies']],
+            'val_losses': [float(x) for x in training_metrics['val_losses']],
+            'val_accuracies': [float(x) for x in training_metrics['val_accuracies']],
+            'val_f1_scores': [float(x) for x in training_metrics['val_f1_scores']]
+        }
+    }
+
+    with open('model_metrics.json', 'w') as f:
+        json.dump(metrics_data, f, indent=2)
+    print("Metrics saved to model_metrics.json")
 
 if __name__ == "__main__":
     main()

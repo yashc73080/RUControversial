@@ -226,7 +226,7 @@ optimizer_grouped_parameters = [
 
 
 # Final:
-train_deberta_small_20250507_171145.43544916.o
+train_deberta_small_20250507_203939.43545380.o
 
 Connection successful!
 Total number of samples: 19722
@@ -243,22 +243,22 @@ Class weights: [ 6.  25.  15.   1.5]
 Using device: cuda
 Model and optimizer initialized.
 Training with 5 epochs, early stopping with patience=1
-Epoch 1/5 - Avg training loss: 6.8539
+Epoch 1/5 - Avg training loss: 6.8630
 Validation - Accuracy: 0.2119, F1: 0.0741
 New best model saved with F1: 0.0741
 Unfreezing encoder parameters...
-Epoch 2/5 - Avg training loss: 6.7509
-Validation - Accuracy: 0.6097, F1: 0.5110
-New best model saved with F1: 0.5110
-Epoch 3/5 - Avg training loss: 6.6894
+Epoch 2/5 - Avg training loss: 6.7609
+Validation - Accuracy: 0.6087, F1: 0.5109
+New best model saved with F1: 0.5109
+Epoch 3/5 - Avg training loss: 6.6916
 Validation - Accuracy: 0.2119, F1: 0.0741
 Early stopping triggered after 3 epochs
 Training complete.
-Test Accuracy: 0.6200
-Test F1-Score: 0.5186
+Test Accuracy: 0.6193
+Test F1-Score: 0.5189
                   precision    recall  f1-score   support
 
-         asshole       0.32      0.10      0.15       837
+         asshole       0.32      0.11      0.16       837
   everyone sucks       0.00      0.00      0.00       216
 no assholes here       0.00      0.00      0.00       379
  not the asshole       0.64      0.94      0.76      2513
