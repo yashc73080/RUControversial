@@ -15,6 +15,9 @@ from sklearn.metrics import accuracy_score, f1_score, classification_report
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
+import nltk
+from nltk.corpus import stopwords
+
 from tqdm import tqdm
 import os
 import re
@@ -157,7 +160,7 @@ class BERTClassifier(nn.Module):
                     step_accuracies.append(step_acc)
                     global_steps.append(global_step)
                     
-                    print(f"Step {global_step}: Loss = {step_loss:.4f}, Accuracy = {step_acc:.4f}")
+                    # print(f"Step {global_step}: Loss = {step_loss:.4f}, Accuracy = {step_acc:.4f}")
                     
                     # Reset batch tracking
                     batch_predictions = []
@@ -307,6 +310,14 @@ def preprocess_text(text):
         
         # Remove extra whitespaces
         text = re.sub(r'\s+', ' ', text).strip()
+
+        # Tokenize and remove stop words (excluding "not")
+        stop_words = set(stopwords.words('english')) - {"not"}
+        words = text.split()
+        filtered_words = [word for word in words if word not in stop_words]
+        
+        # Reconstruct the text
+        text = ' '.join(filtered_words)
         
         return text
     return ""
@@ -509,6 +520,8 @@ def load_metrics(metrics_path='../model_metrics.json'):
     if 'step_metrics' in metrics:
         for key in metrics['step_metrics']:
             metrics['step_metrics'][key] = np.array(metrics['step_metrics'][key])
+
+    print("Loaded metrics")
     
     return metrics
 
@@ -516,6 +529,8 @@ def main():
     # Set seed for reproducibility
     set_seed(42)
     
+    nltk.download('stopwords')
+
     # Load the DataFrame
     df = get_df()
     
