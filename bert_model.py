@@ -545,10 +545,10 @@ def main():
     print("Final model saved to final_aita_model.pth")
 
     metrics_data = {
-        'predictions': predictions,
-        'true_labels': true_labels,
-        'test_accuracy': acc,
-        'test_f1': f1,
+        'predictions': [int(x) for x in predictions],
+        'true_labels': [int(x) for x in true_labels],
+        'test_accuracy': float(acc),
+        'test_f1': float(f1),
         'training_metrics': {
             'train_losses': [float(x) for x in training_metrics['train_losses']],
             'train_accuracies': [float(x) for x in training_metrics['train_accuracies']],
