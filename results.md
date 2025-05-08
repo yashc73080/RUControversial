@@ -226,7 +226,7 @@ optimizer_grouped_parameters = [
 
 
 # Final:
-train_deberta_small_20250507_203939.43545380.o
+train_deberta_small_20250508_112029.43548406.o
 
 Connection successful!
 Total number of samples: 19722
@@ -243,28 +243,29 @@ Class weights: [ 6.  25.  15.   1.5]
 Using device: cuda
 Model and optimizer initialized.
 Training with 5 epochs, early stopping with patience=1
-Epoch 1/5 - Avg training loss: 6.8630
-Validation - Accuracy: 0.2119, F1: 0.0741
+Epoch 1/5 - Avg training loss: 6.8630, Accuracy: 0.2225
+Validation - Loss: 6.7724, Accuracy: 0.2119, F1: 0.0741
 New best model saved with F1: 0.0741
 Unfreezing encoder parameters...
-Epoch 2/5 - Avg training loss: 6.7609
-Validation - Accuracy: 0.6087, F1: 0.5109
-New best model saved with F1: 0.5109
-Epoch 3/5 - Avg training loss: 6.6916
-Validation - Accuracy: 0.2119, F1: 0.0741
+Epoch 2/5 - Avg training loss: 6.7555, Accuracy: 0.1790
+Validation - Loss: 6.7443, Accuracy: 0.6371, F1: 0.4959
+New best model saved with F1: 0.4959
+Epoch 3/5 - Avg training loss: 6.7165, Accuracy: 0.1866
+Validation - Loss: 6.7357, Accuracy: 0.2119, F1: 0.0741
 Early stopping triggered after 3 epochs
 Training complete.
-Test Accuracy: 0.6193
-Test F1-Score: 0.5189
+Test Accuracy: 0.6370
+Test F1-Score: 0.4958
                   precision    recall  f1-score   support
 
-         asshole       0.32      0.11      0.16       837
+         asshole       0.00      0.00      0.00       837
   everyone sucks       0.00      0.00      0.00       216
 no assholes here       0.00      0.00      0.00       379
- not the asshole       0.64      0.94      0.76      2513
+ not the asshole       0.64      1.00      0.78      2513
 
-        accuracy                           0.62      3945
-       macro avg       0.24      0.26      0.23      3945
-    weighted avg       0.48      0.62      0.52      3945
+        accuracy                           0.64      3945
+       macro avg       0.16      0.25      0.19      3945
+    weighted avg       0.41      0.64      0.50      3945
 
 Final model saved to final_aita_model.pth
+Metrics saved to model_metrics.json

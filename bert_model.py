@@ -68,7 +68,7 @@ class BERTClassifier(nn.Module):
         
         return logits
     
-    def train_model(self, train_loader, optimizer, scheduler, loss_fn, device, epochs=3, eval_loader=None, patience=3):
+    def train_model(self, train_loader, optimizer, scheduler, loss_fn, device, epochs=3, eval_loader=None, patience=3, log_every_n_steps=50):
         best_f1 = 0
         patience_counter = 0
         
@@ -78,6 +78,13 @@ class BERTClassifier(nn.Module):
         val_losses = []
         val_accuracies = []
         val_f1_scores = []
+        
+        # Initialize step-level metrics tracking
+        step_losses = []
+        step_accuracies = []
+        global_steps = []
+        
+        global_step = 0
         
         for epoch in range(epochs):
             # Training phase
@@ -94,6 +101,11 @@ class BERTClassifier(nn.Module):
                     param.requires_grad = True
             
             loop = tqdm(train_loader, leave=True)
+            batch_predictions = []
+            batch_true_labels = []
+            batch_loss = 0
+            batch_count = 0
+            
             for batch in loop:
                 optimizer.zero_grad()
 
@@ -120,14 +132,38 @@ class BERTClassifier(nn.Module):
                 epoch_predictions.extend(preds.cpu().numpy())
                 epoch_true_labels.extend(labels.cpu().numpy())
                 
+                # Also track for step-level metrics
+                batch_predictions.extend(preds.cpu().numpy())
+                batch_true_labels.extend(labels.cpu().numpy())
+                
                 optimizer.step()
                 scheduler.step()
                 
                 total_loss += loss.item()
+                batch_loss += loss.item()
                 total_steps += 1
+                batch_count += 1
+                global_step += 1
 
                 loop.set_description(f'Epoch {epoch+1}/{epochs}')
                 loop.set_postfix(loss=loss.item())
+                
+                # Calculate and record step-level metrics every N steps
+                if global_step % log_every_n_steps == 0:
+                    step_loss = batch_loss / batch_count
+                    step_acc = accuracy_score(batch_true_labels, batch_predictions)
+                    
+                    step_losses.append(step_loss)
+                    step_accuracies.append(step_acc)
+                    global_steps.append(global_step)
+                    
+                    print(f"Step {global_step}: Loss = {step_loss:.4f}, Accuracy = {step_acc:.4f}")
+                    
+                    # Reset batch tracking
+                    batch_predictions = []
+                    batch_true_labels = []
+                    batch_loss = 0
+                    batch_count = 0
             
             # Calculate training metrics for this epoch
             avg_train_loss = total_loss / total_steps
@@ -193,7 +229,12 @@ class BERTClassifier(nn.Module):
             'train_accuracies': train_accuracies,
             'val_losses': val_losses,
             'val_accuracies': val_accuracies,
-            'val_f1_scores': val_f1_scores
+            'val_f1_scores': val_f1_scores,
+            'step_metrics': {
+                'steps': global_steps,
+                'losses': step_losses,
+                'accuracies': step_accuracies
+            }
         }
         return metrics
 
@@ -361,9 +402,9 @@ def prepare_dataloaders(df, model_name='roberta-base', max_length=256, val_size=
 
     # Direct weight assignment based on observed performance
     class_weights = torch.tensor([
-        8.0,  # "asshole"
-        40.0, # "everyone sucks" - highest weight due to poorest detection
-        30.0, # "no assholes here"
+        6.0,  # "asshole"
+        25.0, # "everyone sucks" - highest weight due to poorest detection
+        15.0, # "no assholes here"
         1.5   # "not the asshole"
     ], dtype=torch.float)
     
@@ -455,6 +496,22 @@ def predict_with_model(text, loaded_model):
         'class_probabilities': class_probs
     }
 
+def load_metrics(metrics_path='../model_metrics.json'):
+    """Load model metrics from JSON file"""
+    with open(metrics_path, 'r') as f:
+        metrics = json.load(f)
+    
+    # Convert lists to numpy arrays for easier manipulation
+    for key in metrics['training_metrics']:
+        metrics['training_metrics'][key] = np.array(metrics['training_metrics'][key])
+    
+    # Convert step metrics
+    if 'step_metrics' in metrics:
+        for key in metrics['step_metrics']:
+            metrics['step_metrics'][key] = np.array(metrics['step_metrics'][key])
+    
+    return metrics
+
 def main():
     # Set seed for reproducibility
     set_seed(42)
@@ -486,15 +543,15 @@ def main():
         param.requires_grad = False
 
     # Initialize optimizer with weight decay
-    epochs = 5  # Reduce epochs with early stopping
+    epochs = 5 
     total_steps = len(train_loader) * epochs
     warmup_steps = int(0.15 * total_steps)
     
     # Use different learning rates for different components
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in model.bert.named_parameters() if p.requires_grad], 'lr': 5e-6, 'weight_decay': 0.01},
-        {'params': [p for n, p in model.intermediate.named_parameters()], 'lr': 1e-4, 'weight_decay': 0.01},
-        {'params': [p for n, p in model.classifier.named_parameters()], 'lr': 5e-5, 'weight_decay': 0.01}
+        {'params': [p for n, p in model.bert.named_parameters() if p.requires_grad], 'lr': 1e-5, 'weight_decay': 0.01},
+        {'params': [p for n, p in model.intermediate.named_parameters()], 'lr': 3e-4, 'weight_decay': 0.01},
+        {'params': [p for n, p in model.classifier.named_parameters()], 'lr': 3e-4, 'weight_decay': 0.01}
     ]
     
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters)
@@ -509,7 +566,7 @@ def main():
     class_weights = class_weights.to(device)
     loss_fn = FocalLoss(alpha=class_weights.to(device), gamma=2.0)
 
-    patience = 3  # Early stopping patience
+    patience = 1  # Early stopping patience
 
     print("Model and optimizer initialized.")
     print(f"Training with {epochs} epochs, early stopping with patience={patience}.")
@@ -557,6 +614,11 @@ def main():
             'val_losses': [float(x) for x in training_metrics['val_losses']],
             'val_accuracies': [float(x) for x in training_metrics['val_accuracies']],
             'val_f1_scores': [float(x) for x in training_metrics['val_f1_scores']]
+        },
+        'step_metrics': {
+            'steps': [int(x) for x in training_metrics['step_metrics']['steps']],
+            'losses': [float(x) for x in training_metrics['step_metrics']['losses']],
+            'accuracies': [float(x) for x in training_metrics['step_metrics']['accuracies']]
         }
     }
 
