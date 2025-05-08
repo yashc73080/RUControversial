@@ -361,9 +361,9 @@ def prepare_dataloaders(df, model_name='roberta-base', max_length=256, val_size=
 
     # Direct weight assignment based on observed performance
     class_weights = torch.tensor([
-        6.0,  # "asshole"
-        25.0, # "everyone sucks" - highest weight due to poorest detection
-        15.0, # "no assholes here"
+        8.0,  # "asshole"
+        40.0, # "everyone sucks" - highest weight due to poorest detection
+        30.0, # "no assholes here"
         1.5   # "not the asshole"
     ], dtype=torch.float)
     
@@ -492,9 +492,9 @@ def main():
     
     # Use different learning rates for different components
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in model.bert.named_parameters() if p.requires_grad], 'lr': 1e-5, 'weight_decay': 0.01},
-        {'params': [p for n, p in model.intermediate.named_parameters()], 'lr': 3e-4, 'weight_decay': 0.01},
-        {'params': [p for n, p in model.classifier.named_parameters()], 'lr': 3e-4, 'weight_decay': 0.01}
+        {'params': [p for n, p in model.bert.named_parameters() if p.requires_grad], 'lr': 5e-6, 'weight_decay': 0.01},
+        {'params': [p for n, p in model.intermediate.named_parameters()], 'lr': 1e-4, 'weight_decay': 0.01},
+        {'params': [p for n, p in model.classifier.named_parameters()], 'lr': 5e-5, 'weight_decay': 0.01}
     ]
     
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters)
@@ -509,8 +509,10 @@ def main():
     class_weights = class_weights.to(device)
     loss_fn = FocalLoss(alpha=class_weights.to(device), gamma=2.0)
 
+    patience = 3  # Early stopping patience
+
     print("Model and optimizer initialized.")
-    print(f"Training with {epochs} epochs, early stopping with patience=1")
+    print(f"Training with {epochs} epochs, early stopping with patience={patience}.")
 
     # Train the model with early stopping
     training_metrics = model.train_model(
@@ -521,7 +523,7 @@ def main():
         device, 
         epochs=epochs, 
         eval_loader=val_loader,
-        patience=1  # Early stopping
+        patience=patience
     )
     
     print("Training complete.")
