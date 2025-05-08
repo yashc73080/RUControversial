@@ -544,10 +544,9 @@ def main():
     }, "final_aita_model.pth")
     print("Final model saved to final_aita_model.pth")
 
-    
     metrics_data = {
-        'predictions': predictions.tolist(),
-        'true_labels': true_labels.tolist(),
+        'predictions': predictions,
+        'true_labels': true_labels,
         'test_accuracy': acc,
         'test_f1': f1,
         'training_metrics': {
