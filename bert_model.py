@@ -15,9 +15,6 @@ from sklearn.metrics import accuracy_score, f1_score, classification_report
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
-import nltk
-from nltk.corpus import stopwords
-
 from tqdm import tqdm
 import os
 import re
@@ -310,14 +307,6 @@ def preprocess_text(text):
         
         # Remove extra whitespaces
         text = re.sub(r'\s+', ' ', text).strip()
-
-        # Tokenize and remove stop words (excluding "not")
-        stop_words = set(stopwords.words('english')) - {"not"}
-        words = text.split()
-        filtered_words = [word for word in words if word not in stop_words]
-        
-        # Reconstruct the text
-        text = ' '.join(filtered_words)
         
         return text
     return ""
@@ -529,8 +518,6 @@ def main():
     # Set seed for reproducibility
     set_seed(42)
     
-    nltk.download('stopwords')
-
     # Load the DataFrame
     df = get_df()
     
@@ -618,6 +605,7 @@ def main():
     }, "final_aita_model.pth")
     print("Final model saved to final_aita_model.pth")
 
+    # Save final metrics 
     metrics_data = {
         'predictions': [int(x) for x in predictions],
         'true_labels': [int(x) for x in true_labels],
