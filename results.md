@@ -320,3 +320,34 @@ no assholes here       0.00      0.00      0.00       379
 
 Final model saved to final_aita_model.pth
 Metrics saved to model_metrics.json
+
+simplified:
+
+Class weights: [ 6.  25.  15.   1.5]
+Using device: cuda
+Model and optimizer initialized.
+Training with 5 epochs, early stopping with patience=1.
+Epoch 1/5 - Avg training loss: 6.8579, Accuracy: 0.2390
+Validation - Loss: 6.8352, Accuracy: 0.2119, F1: 0.0741
+New best model saved with F1: 0.0741
+Unfreezing encoder parameters...
+Epoch 2/5 - Avg training loss: 6.7383, Accuracy: 0.1847
+Validation - Loss: 6.7335, Accuracy: 0.6290, F1: 0.4985
+New best model saved with F1: 0.4985
+Epoch 3/5 - Avg training loss: 6.6731, Accuracy: 0.2217
+Validation - Loss: 6.8134, Accuracy: 0.2833, F1: 0.2325
+Early stopping triggered after 3 epochs
+Training complete.
+
+Test Accuracy: 0.6340
+Test F1-Score: 0.5037
+                  precision    recall  f1-score   support
+
+         asshole       0.44      0.02      0.04       837
+  everyone sucks       0.10      0.01      0.02       216
+no assholes here       0.00      0.00      0.00       379
+ not the asshole       0.64      0.99      0.78      2513
+
+        accuracy                           0.63      3945
+       macro avg       0.30      0.26      0.21      3945
+    weighted avg       0.51      0.63      0.50      3945
