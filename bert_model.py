@@ -20,6 +20,7 @@ import os
 import re
 import numpy as np
 import random
+import json
 
 
 def set_seed(seed_value=42):
@@ -33,7 +34,7 @@ def set_seed(seed_value=42):
 
 
 class BERTClassifier(nn.Module):
-    def __init__(self, model_name='roberta-base', num_classes=4, dropout=0.3):
+    def __init__(self, model_name='microsoft/deberta-v3-small', num_classes=4, dropout=0.3):
         super(BERTClassifier, self).__init__()
         self.bert = AutoModel.from_pretrained(model_name)
         self.dropout = nn.Dropout(dropout)
@@ -67,15 +68,31 @@ class BERTClassifier(nn.Module):
         
         return logits
     
-    def train_model(self, train_loader, optimizer, scheduler, loss_fn, device, epochs=3, eval_loader=None, patience=3):
+    def train_model(self, train_loader, optimizer, scheduler, loss_fn, device, epochs=3, eval_loader=None, patience=3, log_every_n_steps=50):
         best_f1 = 0
         patience_counter = 0
+        
+        # Initialize lists to store metrics
+        train_losses = []
+        train_accuracies = []
+        val_losses = []
+        val_accuracies = []
+        val_f1_scores = []
+        
+        # Initialize step-level metrics tracking
+        step_losses = []
+        step_accuracies = []
+        global_steps = []
+        
+        global_step = 0
         
         for epoch in range(epochs):
             # Training phase
             self.train()
             total_loss = 0
             total_steps = 0
+            epoch_predictions = []
+            epoch_true_labels = []
             
             # Only unfreeze BERT parameters after first epoch
             if epoch == 1:
@@ -84,6 +101,11 @@ class BERTClassifier(nn.Module):
                     param.requires_grad = True
             
             loop = tqdm(train_loader, leave=True)
+            batch_predictions = []
+            batch_true_labels = []
+            batch_loss = 0
+            batch_count = 0
+            
             for batch in loop:
                 optimizer.zero_grad()
 
@@ -105,22 +127,86 @@ class BERTClassifier(nn.Module):
                 # Gradient clipping
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                 
+                # Track predictions for accuracy calculation
+                _, preds = torch.max(outputs, dim=1)
+                epoch_predictions.extend(preds.cpu().numpy())
+                epoch_true_labels.extend(labels.cpu().numpy())
+                
+                # Also track for step-level metrics
+                batch_predictions.extend(preds.cpu().numpy())
+                batch_true_labels.extend(labels.cpu().numpy())
+                
                 optimizer.step()
                 scheduler.step()
                 
                 total_loss += loss.item()
+                batch_loss += loss.item()
                 total_steps += 1
+                batch_count += 1
+                global_step += 1
 
                 loop.set_description(f'Epoch {epoch+1}/{epochs}')
                 loop.set_postfix(loss=loss.item())
+                
+                # Calculate and record step-level metrics every N steps
+                if global_step % log_every_n_steps == 0:
+                    step_loss = batch_loss / batch_count
+                    step_acc = accuracy_score(batch_true_labels, batch_predictions)
+                    
+                    step_losses.append(step_loss)
+                    step_accuracies.append(step_acc)
+                    global_steps.append(global_step)
+                    
+                    # print(f"Step {global_step}: Loss = {step_loss:.4f}, Accuracy = {step_acc:.4f}")
+                    
+                    # Reset batch tracking
+                    batch_predictions = []
+                    batch_true_labels = []
+                    batch_loss = 0
+                    batch_count = 0
             
+            # Calculate training metrics for this epoch
             avg_train_loss = total_loss / total_steps
-            print(f"Epoch {epoch+1}/{epochs} - Avg training loss: {avg_train_loss:.4f}")
+            train_acc = accuracy_score(epoch_true_labels, epoch_predictions)
+            train_losses.append(avg_train_loss)
+            train_accuracies.append(train_acc)
+            
+            print(f"Epoch {epoch+1}/{epochs} - Avg training loss: {avg_train_loss:.4f}, Accuracy: {train_acc:.4f}")
             
             # Evaluation phase
             if eval_loader:
+                # Track validation loss
+                self.eval()
+                val_loss = 0
+                val_steps = 0
+                
+                with torch.no_grad():
+                    for batch in eval_loader:
+                        input_ids = batch['input_ids'].to(device)
+                        attention_mask = batch['attention_mask'].to(device)
+                        labels = batch['labels'].to(device)
+                        
+                        token_type_ids = batch.get('token_type_ids')
+                        if token_type_ids is not None:
+                            token_type_ids = token_type_ids.to(device)
+                            outputs = self(input_ids, attention_mask, token_type_ids)
+                        else:
+                            outputs = self(input_ids, attention_mask)
+                        
+                        loss = loss_fn(outputs, labels)
+                        val_loss += loss.item()
+                        val_steps += 1
+                
+                # Calculate validation metrics
+                avg_val_loss = val_loss / val_steps
+                val_losses.append(avg_val_loss)
+                
+                # Get standard evaluation metrics
                 _, _, eval_acc, eval_f1 = self.evaluate_model(eval_loader, device)
-                print(f"Validation - Accuracy: {eval_acc:.4f}, F1: {eval_f1:.4f}")
+                val_accuracies.append(eval_acc)
+                val_f1_scores.append(eval_f1)
+                
+                print(f"Validation - Loss: {avg_val_loss:.4f}, Accuracy: {eval_acc:.4f}, F1: {eval_f1:.4f}")
                 
                 # Early stopping logic
                 if eval_f1 > best_f1:
@@ -135,7 +221,22 @@ class BERTClassifier(nn.Module):
                         print(f"Early stopping triggered after {epoch+1} epochs")
                         # Load the best model
                         self.load_state_dict(torch.load("best_bert_model.pth"))
-                        return
+                        break
+        
+        # Return all collected metrics
+        metrics = {
+            'train_losses': train_losses,
+            'train_accuracies': train_accuracies,
+            'val_losses': val_losses,
+            'val_accuracies': val_accuracies,
+            'val_f1_scores': val_f1_scores,
+            'step_metrics': {
+                'steps': global_steps,
+                'losses': step_losses,
+                'accuracies': step_accuracies
+            }
+        }
+        return metrics
 
     def evaluate_model(self, test_loader, device):
         self.eval()
@@ -360,7 +461,7 @@ def predict_with_model(text, loaded_model):
         preprocessed_text, 
         truncation=True, 
         padding='max_length', 
-        max_length=256, 
+        max_length=500, 
         return_tensors='pt'
     )
     
@@ -395,6 +496,24 @@ def predict_with_model(text, loaded_model):
         'class_probabilities': class_probs
     }
 
+def load_metrics(metrics_path='../model_metrics.json'):
+    """Load model metrics from JSON file"""
+    with open(metrics_path, 'r') as f:
+        metrics = json.load(f)
+    
+    # Convert lists to numpy arrays for easier manipulation
+    for key in metrics['training_metrics']:
+        metrics['training_metrics'][key] = np.array(metrics['training_metrics'][key])
+    
+    # Convert step metrics
+    if 'step_metrics' in metrics:
+        for key in metrics['step_metrics']:
+            metrics['step_metrics'][key] = np.array(metrics['step_metrics'][key])
+
+    print("Loaded metrics")
+    
+    return metrics
+
 def main():
     # Set seed for reproducibility
     set_seed(42)
@@ -411,7 +530,7 @@ def main():
     
     # Get the dataloaders with validation set
     train_loader, val_loader, test_loader, label_encoder, class_weights = prepare_dataloaders(
-        df, model_name=model_name, max_length=256
+        df, model_name=model_name, max_length=500
     )
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -426,7 +545,7 @@ def main():
         param.requires_grad = False
 
     # Initialize optimizer with weight decay
-    epochs = 5  # Reduce epochs with early stopping
+    epochs = 5 
     total_steps = len(train_loader) * epochs
     warmup_steps = int(0.15 * total_steps)
     
@@ -449,11 +568,13 @@ def main():
     class_weights = class_weights.to(device)
     loss_fn = FocalLoss(alpha=class_weights.to(device), gamma=2.0)
 
+    patience = 1  # Early stopping patience
+
     print("Model and optimizer initialized.")
-    print(f"Training with {epochs} epochs, early stopping with patience=1")
+    print(f"Training with {epochs} epochs, early stopping with patience={patience}.")
 
     # Train the model with early stopping
-    model.train_model(
+    training_metrics = model.train_model(
         train_loader, 
         optimizer, 
         scheduler, 
@@ -461,7 +582,7 @@ def main():
         device, 
         epochs=epochs, 
         eval_loader=val_loader,
-        patience=1  # Early stopping
+        patience=patience
     )
     
     print("Training complete.")
@@ -483,6 +604,30 @@ def main():
         'model_name': model_name
     }, "final_aita_model.pth")
     print("Final model saved to final_aita_model.pth")
+
+    # Save final metrics 
+    metrics_data = {
+        'predictions': [int(x) for x in predictions],
+        'true_labels': [int(x) for x in true_labels],
+        'test_accuracy': float(acc),
+        'test_f1': float(f1),
+        'training_metrics': {
+            'train_losses': [float(x) for x in training_metrics['train_losses']],
+            'train_accuracies': [float(x) for x in training_metrics['train_accuracies']],
+            'val_losses': [float(x) for x in training_metrics['val_losses']],
+            'val_accuracies': [float(x) for x in training_metrics['val_accuracies']],
+            'val_f1_scores': [float(x) for x in training_metrics['val_f1_scores']]
+        },
+        'step_metrics': {
+            'steps': [int(x) for x in training_metrics['step_metrics']['steps']],
+            'losses': [float(x) for x in training_metrics['step_metrics']['losses']],
+            'accuracies': [float(x) for x in training_metrics['step_metrics']['accuracies']]
+        }
+    }
+
+    with open('model_metrics.json', 'w') as f:
+        json.dump(metrics_data, f, indent=2)
+    print("Metrics saved to model_metrics.json")
 
 if __name__ == "__main__":
     main()

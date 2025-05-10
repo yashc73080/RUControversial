@@ -26,7 +26,7 @@ sbatch <<EOT
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
-#SBATCH --mem=16G
+#SBATCH --mem=20G
 #SBATCH --cpus-per-task=4
 #SBATCH --time=08:00:00
 #SBATCH --mail-user=yc1376@scarletmail.rutgers.edu

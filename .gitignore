@@ -3,3 +3,4 @@ Data/*
 *.csv
 *.pth
 __pycache__/*
+*.out
